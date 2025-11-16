@@ -1,0 +1,151 @@
+name: PHP Tests
+
+on:
+  push:
+    branches: [ main, develop, claude/** ]
+    paths:
+      - 'php/**'
+      - '.github/workflows/php-tests.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'php/**'
+      - '.github/workflows/php-tests.yml'
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php-version }} Tests
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.2', '8.3']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: mbstring, xml, curl, sqlite3, sodium
+          coverage: xdebug
+          tools: composer:v2
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+        working-directory: php
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('php/composer.lock') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+        working-directory: php
+
+      - name: Create test environment file
+        run: cp .env.testing .env
+        working-directory: php
+
+      - name: Create storage directories
+        run: |
+          mkdir -p storage/logs
+          mkdir -p storage/database
+          mkdir -p storage/cache
+        working-directory: php
+
+      - name: Run PHPUnit tests
+        run: vendor/bin/phpunit --testdox
+        working-directory: php
+
+      - name: Run PHPUnit tests with coverage
+        if: matrix.php-version == '8.2'
+        run: vendor/bin/phpunit --coverage-text --coverage-clover=coverage.xml
+        working-directory: php
+
+      - name: Upload coverage to Codecov
+        if: matrix.php-version == '8.2'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./php/coverage.xml
+          flags: php
+          name: php-${{ matrix.php-version }}
+
+  static-analysis:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, xml, curl, sqlite3, sodium
+          tools: composer:v2, phpstan
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+        working-directory: php
+
+      - name: Run PHPStan
+        run: vendor/bin/phpstan analyse --level=5 src
+        working-directory: php
+
+  code-style:
+    name: Code Style
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          tools: composer:v2, php-cs-fixer
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+        working-directory: php
+
+      - name: Check code style
+        run: |
+          if [ -f .php-cs-fixer.php ]; then
+            vendor/bin/php-cs-fixer fix --dry-run --diff
+          else
+            echo "No .php-cs-fixer.php config found, skipping code style check"
+          fi
+        working-directory: php
+
+  security-check:
+    name: Security Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          tools: composer:v2
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+        working-directory: php
+
+      - name: Security check
+        run: composer audit
+        working-directory: php
