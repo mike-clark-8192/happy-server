@@ -219,21 +219,59 @@ return [
     /**
      * Rate Limiting Configuration
      */
-    'rate_limit' => [
+    'rate_limiting' => [
         /**
          * Enable rate limiting
          */
         'enabled' => filter_var($_ENV['RATE_LIMIT_ENABLED'] ?? true, FILTER_VALIDATE_BOOLEAN),
 
         /**
-         * Requests per minute
+         * Maximum requests per window
          */
-        'requests_per_minute' => (int)($_ENV['RATE_LIMIT_RPM'] ?? 60),
+        'max_requests' => (int)($_ENV['RATE_LIMIT_MAX_REQUESTS'] ?? 60),
+
+        /**
+         * Time window in seconds
+         */
+        'window_seconds' => (int)($_ENV['RATE_LIMIT_WINDOW'] ?? 60),
 
         /**
          * Whitelist IPs (comma-separated)
          */
         'whitelist' => explode(',', $_ENV['RATE_LIMIT_WHITELIST'] ?? '127.0.0.1'),
+    ],
+
+    /**
+     * CORS Configuration
+     */
+    'cors' => [
+        /**
+         * Allowed origins (* for all)
+         */
+        'allowed_origins' => explode(',', $_ENV['CORS_ALLOWED_ORIGINS'] ?? '*'),
+
+        /**
+         * Allowed HTTP methods
+         */
+        'allowed_methods' => explode(',', $_ENV['CORS_ALLOWED_METHODS'] ?? 'GET,POST,PUT,DELETE,OPTIONS'),
+
+        /**
+         * Allowed headers
+         */
+        'allowed_headers' => explode(',', $_ENV['CORS_ALLOWED_HEADERS'] ?? 'Authorization,Content-Type,X-Requested-With'),
+
+        /**
+         * Allow credentials
+         */
+        'allow_credentials' => filter_var($_ENV['CORS_ALLOW_CREDENTIALS'] ?? false, FILTER_VALIDATE_BOOLEAN),
+    ],
+
+    /**
+     * Paths Configuration
+     */
+    'paths' => [
+        'cache_dir' => $_ENV['CACHE_DIR'] ?? __DIR__ . '/../storage/cache',
+        'logs_dir' => $_ENV['LOGS_DIR'] ?? __DIR__ . '/../storage/logs',
     ],
 
     /**

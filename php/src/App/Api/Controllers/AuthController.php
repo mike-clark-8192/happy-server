@@ -5,7 +5,10 @@ namespace Happy\App\Api\Controllers;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 use Happy\Services\Auth\TokenService;
+use Happy\Services\Auth\SignatureService;
 use Happy\Storage\Models\Account;
+use Happy\Storage\Models\TerminalAuthRequest;
+use Happy\Utils\Validator;
 
 /**
  * Authentication API controller - handles auth flows.
@@ -13,10 +16,12 @@ use Happy\Storage\Models\Account;
 class AuthController
 {
     private TokenService $tokenService;
+    private SignatureService $signatureService;
 
-    public function __construct(TokenService $tokenService)
+    public function __construct(TokenService $tokenService, SignatureService $signatureService)
     {
         $this->tokenService = $tokenService;
+        $this->signatureService = $signatureService;
     }
 
     /**
@@ -27,18 +32,27 @@ class AuthController
     {
         $data = $request->getParsedBody() ?? [];
 
-        $publicKey = $data['publicKey'] ?? null;
-        $signature = $data['signature'] ?? null;
-        $timestamp = $data['timestamp'] ?? null;
-
-        if (!$publicKey || !$signature || !$timestamp) {
+        // Validate input
+        try {
+            Validator::make($data)
+                ->required('publicKey')
+                ->required('signature')
+                ->required('timestamp')
+                ->string('publicKey')
+                ->string('signature')
+                ->validate();
+        } catch (\Exception $e) {
             $response->getBody()->write(json_encode([
-                'error' => 'Missing required fields: publicKey, signature, timestamp'
+                'error' => $e->getMessage()
             ]));
             return $response
                 ->withStatus(400)
                 ->withHeader('Content-Type', 'application/json');
         }
+
+        $publicKey = $data['publicKey'];
+        $signature = $data['signature'];
+        $timestamp = $data['timestamp'];
 
         // Verify timestamp is recent (within 5 minutes)
         $timestampInt = (int)$timestamp;
@@ -52,8 +66,27 @@ class AuthController
                 ->withHeader('Content-Type', 'application/json');
         }
 
-        // TODO: Verify signature using sodium_crypto_sign_verify_detached
-        // For now, we'll trust the public key and create/find the account
+        // Verify signature
+        try {
+            $message = (string)$timestamp;
+            $isValid = $this->signatureService->verify($publicKey, $signature, $message);
+
+            if (!$isValid) {
+                $response->getBody()->write(json_encode([
+                    'error' => 'Invalid signature'
+                ]));
+                return $response
+                    ->withStatus(401)
+                    ->withHeader('Content-Type', 'application/json');
+            }
+        } catch (\Exception $e) {
+            $response->getBody()->write(json_encode([
+                'error' => 'Signature verification failed: ' . $e->getMessage()
+            ]));
+            return $response
+                ->withStatus(401)
+                ->withHeader('Content-Type', 'application/json');
+        }
 
         // Find or create account
         $account = Account::where('public_key', $publicKey)->first();
@@ -90,13 +123,21 @@ class AuthController
         $data = $request->getParsedBody() ?? [];
 
         // Create a terminal auth request
-        $requestId = bin2hex(random_bytes(16));
+        $authRequest = new TerminalAuthRequest([
+            'id' => TerminalAuthRequest::generateId(),
+            'expires_at' => now()->addMinutes(5),
+        ]);
 
-        // In a real implementation, store this in the database
-        // For now, return a placeholder
+        // Store metadata if provided
+        if (isset($data['metadata'])) {
+            $authRequest->setMetadata($data['metadata']);
+        }
+
+        $authRequest->save();
+
         $response->getBody()->write(json_encode([
-            'requestId' => $requestId,
-            'expiresAt' => date('c', time() + 300), // 5 minutes
+            'requestId' => $authRequest->id,
+            'expiresAt' => $authRequest->expires_at->toIso8601String(),
         ]));
         return $response
             ->withStatus(201)
@@ -111,8 +152,50 @@ class AuthController
     {
         $requestId = $args['id'];
 
-        // In a real implementation, look up the request in the database
-        // For now, return pending status
+        $authRequest = TerminalAuthRequest::find($requestId);
+
+        if (!$authRequest) {
+            $response->getBody()->write(json_encode([
+                'error' => 'Auth request not found'
+            ]));
+            return $response
+                ->withStatus(404)
+                ->withHeader('Content-Type', 'application/json');
+        }
+
+        // Check if expired
+        if ($authRequest->isExpired()) {
+            $response->getBody()->write(json_encode([
+                'requestId' => $requestId,
+                'status' => 'expired',
+                'token' => null,
+            ]));
+            return $response->withHeader('Content-Type', 'application/json');
+        }
+
+        // Check if approved
+        if ($authRequest->isApproved()) {
+            // Get the account and generate token
+            $account = $authRequest->responseAccount;
+            $token = $this->tokenService->generatePersistent([
+                'userId' => $account->id,
+                'publicKey' => $account->public_key,
+            ]);
+
+            $response->getBody()->write(json_encode([
+                'requestId' => $requestId,
+                'status' => 'approved',
+                'token' => $token,
+                'account' => [
+                    'id' => $account->id,
+                    'publicKey' => $account->public_key,
+                    'githubUsername' => $account->github_username,
+                ],
+            ]));
+            return $response->withHeader('Content-Type', 'application/json');
+        }
+
+        // Still pending
         $response->getBody()->write(json_encode([
             'requestId' => $requestId,
             'status' => 'pending',
@@ -127,21 +210,61 @@ class AuthController
      */
     public function respondToRequest(Request $request, Response $response): Response
     {
+        $user = $request->getAttribute('user');
         $data = $request->getParsedBody() ?? [];
 
-        $requestId = $data['requestId'] ?? null;
-        $approved = $data['approved'] ?? false;
-
-        if (!$requestId) {
+        // Validate input
+        try {
+            Validator::make($data)
+                ->required('requestId')
+                ->string('requestId')
+                ->validate();
+        } catch (\Exception $e) {
             $response->getBody()->write(json_encode([
-                'error' => 'requestId is required'
+                'error' => $e->getMessage()
             ]));
             return $response
                 ->withStatus(400)
                 ->withHeader('Content-Type', 'application/json');
         }
 
-        // In a real implementation, update the request in the database
+        $requestId = $data['requestId'];
+        $approved = $data['approved'] ?? true;
+
+        $authRequest = TerminalAuthRequest::find($requestId);
+
+        if (!$authRequest) {
+            $response->getBody()->write(json_encode([
+                'error' => 'Auth request not found'
+            ]));
+            return $response
+                ->withStatus(404)
+                ->withHeader('Content-Type', 'application/json');
+        }
+
+        if ($authRequest->isExpired()) {
+            $response->getBody()->write(json_encode([
+                'error' => 'Auth request has expired'
+            ]));
+            return $response
+                ->withStatus(410)
+                ->withHeader('Content-Type', 'application/json');
+        }
+
+        if ($authRequest->isApproved()) {
+            $response->getBody()->write(json_encode([
+                'error' => 'Auth request already approved'
+            ]));
+            return $response
+                ->withStatus(409)
+                ->withHeader('Content-Type', 'application/json');
+        }
+
+        if ($approved && $user) {
+            $authRequest->approve($user->id);
+            $authRequest->save();
+        }
+
         $response->getBody()->write(json_encode([
             'success' => true,
             'requestId' => $requestId,
